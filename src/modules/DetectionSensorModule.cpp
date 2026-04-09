@@ -6,6 +6,10 @@
 #include "configuration.h"
 #include "main.h"
 #include <Throttle.h>
+#ifdef HAS_IMU_DETECTION
+#include "motion/LSM6DS3Sensor.h"
+#include "modules/PositionModule.h"
+#endif
 DetectionSensorModule *detectionSensorModule;
 
 #define GPIO_POLLING_INTERVAL 100
@@ -74,7 +78,25 @@ int32_t DetectionSensorModule::runOnce()
         // This is the first time the OSThread library has called this function, so do some setup
         firstTime = false;
         if (moduleConfig.detection_sensor.monitor_pin > 0) {
-            pinMode(moduleConfig.detection_sensor.monitor_pin, moduleConfig.detection_sensor.use_pullup ? INPUT_PULLUP : INPUT);
+#ifdef HAS_IMU_DETECTION
+            if (moduleConfig.detection_sensor.monitor_pin == IMU_INT1_PIN) {
+                isImuMode = true;
+                // Configure IMU for autonomous motion detection with INT1 output
+                // (handles power-on, Wire init/end, and IMU register config internally)
+                LSM6DS3Sensor::initForDetection(5); // TODO: use configurable threshold (5 = ~155mg for testing)
+                // INT1 is push-pull active-high from the IMU
+                pinMode(IMU_INT1_PIN, INPUT);
+                LOG_INFO("Detection Sensor Module: IMU mode, INT1 on pin %d", IMU_INT1_PIN);
+                // Visual indicator: BLUE = IMU init OK
+                ledOn(PIN_LED2);
+                delay(2000);
+                ledOff(PIN_LED2);
+            } else
+#endif
+            {
+                pinMode(moduleConfig.detection_sensor.monitor_pin,
+                        moduleConfig.detection_sensor.use_pullup ? INPUT_PULLUP : INPUT);
+            }
         } else {
             LOG_WARN("Detection Sensor Module: Set to enabled but no monitor pin is set. Disable module");
             return disable();
@@ -84,7 +106,15 @@ int32_t DetectionSensorModule::runOnce()
         return setStartDelay();
     }
 
-    // LOG_DEBUG("Detection Sensor Module: Current pin state: %i", digitalRead(moduleConfig.detection_sensor.monitor_pin));
+#ifdef HAS_IMU_DETECTION
+    if (isImuMode) {
+        static uint32_t lastImuLog = 0;
+        if (millis() - lastImuLog > 5000) {
+            LOG_INFO("IMU INT1 pin state: %d", digitalRead(IMU_INT1_PIN));
+            lastImuLog = millis();
+        }
+    }
+#endif
 
     if (!Throttle::isWithinTimespanMs(lastSentToMesh,
                                       Default::getConfiguredOrDefaultMs(moduleConfig.detection_sensor.minimum_broadcast_secs))) {
@@ -119,6 +149,23 @@ int32_t DetectionSensorModule::runOnce()
 void DetectionSensorModule::sendDetectionMessage()
 {
     LOG_DEBUG("Detected event observed. Send message");
+#ifdef HAS_IMU_DETECTION
+    if (isImuMode) {
+        LOG_INFO("IMU motion detected! INT1 pin state: %d", digitalRead(IMU_INT1_PIN));
+        // Clear latched INT1 by reading WAKE_UP_SRC register (0x1B)
+        IMU_WIRE.begin();
+        IMU_WIRE.beginTransmission(0x6A);
+        IMU_WIRE.write(0x1B); // WAKE_UP_SRC register
+        IMU_WIRE.endTransmission(false);
+        IMU_WIRE.requestFrom((uint8_t)0x6A, (uint8_t)1);
+        IMU_WIRE.read(); // Reading clears the latch
+        IMU_WIRE.end();
+        // Flash RED LED briefly to indicate detection
+        ledOn(PIN_LED3);
+        delay(200);
+        ledOff(PIN_LED3);
+    }
+#endif
     char *message = new char[40];
     sprintf(message, "%s detected", moduleConfig.detection_sensor.name);
     meshtastic_MeshPacket *p = allocDataPacket();
@@ -134,6 +181,12 @@ void DetectionSensorModule::sendDetectionMessage()
     if (!channels.isDefaultChannel(0)) {
         LOG_INFO("Send message id=%d, dest=%x, msg=%.*s", p->id, p->to, p->decoded.payload.size, p->decoded.payload.bytes);
         service->sendToMesh(p);
+#ifdef HAS_IMU_DETECTION
+        // Also send fixed position on motion detection
+        if (isImuMode && positionModule) {
+            positionModule->sendOurPosition();
+        }
+#endif
     } else
         LOG_ERROR("Message not allow on Public channel");
     delete[] message;

@@ -527,7 +527,7 @@ void setup()
     LOG_INFO("Scan for i2c devices");
 #endif
 
-#if defined(I2C_SDA1) || (defined(NRF52840_XXAA) && (WIRE_INTERFACES_COUNT == 2))
+#if !defined(SKIP_WIRE1_SCAN) && (defined(I2C_SDA1) || (defined(NRF52840_XXAA) && (WIRE_INTERFACES_COUNT == 2)))
     i2cScanner->scanPort(ScanI2C::I2CPort::WIRE1);
 #endif
 

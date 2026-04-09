@@ -21,6 +21,14 @@ class LSM6DS3Sensor : public MotionSensor
     explicit LSM6DS3Sensor(ScanI2C::FoundDevice foundDevice);
     virtual bool init() override;
     virtual int32_t runOnce() override;
+
+#ifdef HAS_IMU_DETECTION
+    // Configure IMU for autonomous motion detection with INT1 output.
+    // After this call, the IMU runs on its internal oscillator and asserts
+    // INT1 (latched high) on motion exceeding the threshold. No further
+    // I2C communication is needed during normal operation.
+    static bool initForDetection(uint8_t threshold = LSM6DS3_WAKE_THRESH);
+#endif
 };
 
 #endif
