@@ -100,5 +100,30 @@ meshtastic --set detection_sensor.name "MD1"
 - **GPS must be `DISABLED`** (`position.gps_mode 0`) — otherwise the GPS module overwrites the fixed position with zeros on boot.
 - **TRACKER role + `power.is_power_saving=true` wipes the fixed position on every boot** ([PositionModule.cpp:46-51](src/modules/PositionModule.cpp#L46-L51)). For fixed-position sensors, use CLIENT role or keep power_saving off.
 - **`detection_trigger_type` must be `LOGIC_HIGH`** (not `RISING_EDGE`) for proper re-triggering with latched interrupts.
-- **IMU high-pass filter takes ~1 sec to settle** after init. The init code polls INT1 until it stays LOW for 500ms before considering the sensor armed.
+- **IMU high-pass filter takes ~1 sec to settle** after init. The init code polls INT1 until it stays LOW for 500ms before considering the sensor armed (5-second overall timeout as a safety net).
 - **The detection text message and position broadcast are separate mesh packets** (different ports). The PoC only sends Position; the Position protobuf has no free-form text field.
+- **`SoftDevice` SVCalls fault if called after BLE has been disabled.** During the Phase 5 deep sleep work we found that `sd_power_gpregret_set()` (and even direct `NRF_POWER->GPREGRET2 =` writes) cause a hardfault when called from inside `cpuDeepSleep()` after `setBluetoothEnable(false)` has run. `.noinit` RAM was used as an alternative persistence mechanism. This code has been removed from the PoC but the lesson remains relevant for the production deep-sleep work.
+
+## Channel Configuration Quirk (gateway compatibility)
+
+When testing with a gateway running an older Meshtastic firmware (e.g. 2.5.15) and the MD1 running newer firmware (e.g. 2.7.22), **renaming the primary channel breaks mesh communication** on both the primary and any secondary channels. The exact mechanism is unclear (possibly related to channel hash computation differences across firmware versions, or a new field in the LoRa config protobuf), but the symptom is that as soon as a name is set on channel index 0, no messages flow in either direction.
+
+**Workaround**: leave the primary channel unnamed (default) and put your application traffic on a named secondary channel:
+- **Primary (index 0)**: empty name, default PSK (1-byte short-form). Both ends will use the modem-preset display name (e.g. "LongFast") for hashing and decode each other's traffic.
+- **Secondary (index 1+)**: named (e.g. "TAV-OPS") with a custom PSK. Use this for human text messaging and any segregated traffic.
+
+The MD1's `DetectionSensorModule` sends Position packets on **channel index 0** (primary), so position alerts go out on the unnamed primary and are picked up by any gateway that shares the same default primary channel + LoRa region + modem preset.
+
+If/when both ends are upgraded to compatible firmware versions, naming the primary should work — until then, leave it default.
+
+## Verification
+
+End-to-end test that the PoC works:
+1. Configure the MD1 per the **Meshtastic Configuration (PoC)** section above.
+2. Configure a gateway with the same default primary channel (no name change) and same LoRa region/modem preset.
+3. Connect a Meshtastic mobile or web app to the gateway.
+4. Find `TAV-MD1-xxxx` in the gateway's node list — it should already show the configured fixed position.
+5. Shake the MD1.
+6. Within ~5-10 seconds the gateway's view of the MD1 should refresh with an updated "last heard" timestamp; the position pin should be at the configured lat/lon.
+7. Repeat (after the cooldown window) — the position should update again.
+8. Shake during the cooldown — no update should occur (motion is silently dropped).
