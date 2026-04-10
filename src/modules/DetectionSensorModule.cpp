@@ -9,7 +9,6 @@
 #ifdef HAS_IMU_DETECTION
 #include "motion/LSM6DS3Sensor.h"
 #include "modules/PositionModule.h"
-#include "sleep.h"
 #endif
 DetectionSensorModule *detectionSensorModule;
 
@@ -84,14 +83,38 @@ int32_t DetectionSensorModule::runOnce()
                 isImuMode = true;
                 // Configure IMU for autonomous motion detection with INT1 output
                 // (handles power-on, Wire init/end, and IMU register config internally)
-                LSM6DS3Sensor::initForDetection(5); // TODO: use configurable threshold (5 = ~155mg for testing)
+                LSM6DS3Sensor::initForDetection(10); // TODO: use configurable threshold (10 = ~310mg)
                 // INT1 is push-pull active-high from the IMU
                 pinMode(IMU_INT1_PIN, INPUT);
-                LOG_INFO("Detection Sensor Module: IMU mode, INT1 on pin %d", IMU_INT1_PIN);
-                // Visual indicator: BLUE = IMU init OK
-                ledOn(PIN_LED2);
-                delay(2000);
-                ledOff(PIN_LED2);
+
+                // The LSM6DS3 high-pass slope filter takes time to settle after init.
+                // Until it settles, INT1 may spuriously latch HIGH even when stationary.
+                // Wait until INT1 stays LOW for several consecutive 100ms checks,
+                // up to a 5-second timeout, before considering the IMU "armed".
+                IMU_WIRE.begin();
+                int stableCount = 0;
+                uint32_t settleStart = millis();
+                while (stableCount < 5 && (millis() - settleStart) < 5000) {
+                    delay(100);
+                    if (digitalRead(IMU_INT1_PIN)) {
+                        // Clear latch and reset stability counter
+                        IMU_WIRE.beginTransmission(0x6A);
+                        IMU_WIRE.write(0x1B); // WAKE_UP_SRC
+                        IMU_WIRE.endTransmission(false);
+                        IMU_WIRE.requestFrom((uint8_t)0x6A, (uint8_t)1);
+                        IMU_WIRE.read();
+                        stableCount = 0;
+                    } else {
+                        stableCount++;
+                    }
+                }
+                IMU_WIRE.end();
+
+                // Mark a notional "send" so the cooldown logic engages immediately;
+                // any motion captured during the settling window above is dropped.
+                lastSentToMesh = millis();
+                LOG_INFO("Detection Sensor Module: IMU mode, INT1 on pin %d, settled in %ums",
+                         IMU_INT1_PIN, (unsigned)(millis() - settleStart));
             } else
 #endif
             {
@@ -114,6 +137,23 @@ int32_t DetectionSensorModule::runOnce()
             LOG_INFO("IMU INT1 pin state: %d", digitalRead(IMU_INT1_PIN));
             lastImuLog = millis();
         }
+
+        // During cooldown, silently clear any latched INT1 so motion that
+        // happens INSIDE the cooldown window is dropped (not deferred). Only
+        // a NEW motion event after cooldown expires will trigger an alert.
+        if (lastSentToMesh > 0 &&
+            Throttle::isWithinTimespanMs(lastSentToMesh,
+                Default::getConfiguredOrDefaultMs(moduleConfig.detection_sensor.minimum_broadcast_secs)) &&
+            digitalRead(IMU_INT1_PIN)) {
+            IMU_WIRE.begin();
+            IMU_WIRE.beginTransmission(0x6A);
+            IMU_WIRE.write(0x1B); // WAKE_UP_SRC register
+            IMU_WIRE.endTransmission(false);
+            IMU_WIRE.requestFrom((uint8_t)0x6A, (uint8_t)1);
+            IMU_WIRE.read();
+            IMU_WIRE.end();
+            LOG_DEBUG("IMU motion during cooldown — dropped");
+        }
     }
 #endif
 
@@ -125,7 +165,31 @@ int32_t DetectionSensorModule::runOnce()
         wasDetected = isDetected;
         switch (verdict) {
         case DetectionSensorVerdictDetected:
-            sendDetectionMessage();
+#ifdef HAS_IMU_DETECTION
+            if (isImuMode) {
+                // PoC: only send a Position packet on motion. The position IS the alert.
+                LOG_INFO("IMU motion detected, sending position");
+                // Clear latched INT1 by reading WAKE_UP_SRC register (0x1B)
+                IMU_WIRE.begin();
+                IMU_WIRE.beginTransmission(0x6A);
+                IMU_WIRE.write(0x1B);
+                IMU_WIRE.endTransmission(false);
+                IMU_WIRE.requestFrom((uint8_t)0x6A, (uint8_t)1);
+                IMU_WIRE.read();
+                IMU_WIRE.end();
+                // Flash RED LED briefly to indicate detection
+                ledOn(PIN_LED3);
+                delay(200);
+                ledOff(PIN_LED3);
+                if (positionModule) {
+                    positionModule->sendOurPosition();
+                }
+                lastSentToMesh = millis();
+            } else
+#endif
+            {
+                sendDetectionMessage();
+            }
             return DELAYED_INTERVAL;
         case DetectionSensorVerdictSendState:
             sendCurrentStateMessage(isDetected);
@@ -144,48 +208,12 @@ int32_t DetectionSensorModule::runOnce()
         sendCurrentStateMessage(hasDetectionEvent());
         return DELAYED_INTERVAL;
     }
-
-#ifdef HAS_IMU_DETECTION
-    // MD1 sleep cycle: when in IMU mode with power saving enabled, sleep after
-    // initial activity. The IMU INT1 interrupt will wake us early on motion.
-    // Sleep for state_broadcast_secs interval (heartbeat).
-    // TODO: replace hardcoded MD1_SLEEP_SETTLE_MS / default sleep duration
-    //       with a #define or proto config value (Phase 7).
-    #define MD1_SLEEP_SETTLE_MS 30000  // wait this long after last mesh send before sleeping
-    #define MD1_DEFAULT_SLEEP_SECS 3600 // fallback if state_broadcast_secs is 0
-    if (isImuMode && config.power.is_power_saving && lastSentToMesh > 0 &&
-        !Throttle::isWithinTimespanMs(lastSentToMesh, MD1_SLEEP_SETTLE_MS)) {
-        uint32_t sleepSecs = moduleConfig.detection_sensor.state_broadcast_secs > 0
-                                ? moduleConfig.detection_sensor.state_broadcast_secs
-                                : MD1_DEFAULT_SLEEP_SECS;
-        LOG_INFO("MD1: entering deep sleep for %u seconds (motion will wake)", sleepSecs);
-        doDeepSleep((uint32_t)sleepSecs * 1000, false, false);
-    }
-#endif
-
     return GPIO_POLLING_INTERVAL;
 }
 
 void DetectionSensorModule::sendDetectionMessage()
 {
     LOG_DEBUG("Detected event observed. Send message");
-#ifdef HAS_IMU_DETECTION
-    if (isImuMode) {
-        LOG_INFO("IMU motion detected! INT1 pin state: %d", digitalRead(IMU_INT1_PIN));
-        // Clear latched INT1 by reading WAKE_UP_SRC register (0x1B)
-        IMU_WIRE.begin();
-        IMU_WIRE.beginTransmission(0x6A);
-        IMU_WIRE.write(0x1B); // WAKE_UP_SRC register
-        IMU_WIRE.endTransmission(false);
-        IMU_WIRE.requestFrom((uint8_t)0x6A, (uint8_t)1);
-        IMU_WIRE.read(); // Reading clears the latch
-        IMU_WIRE.end();
-        // Flash RED LED briefly to indicate detection
-        ledOn(PIN_LED3);
-        delay(200);
-        ledOff(PIN_LED3);
-    }
-#endif
     char *message = new char[40];
     sprintf(message, "%s detected", moduleConfig.detection_sensor.name);
     meshtastic_MeshPacket *p = allocDataPacket();
@@ -201,12 +229,6 @@ void DetectionSensorModule::sendDetectionMessage()
     if (!channels.isDefaultChannel(0)) {
         LOG_INFO("Send message id=%d, dest=%x, msg=%.*s", p->id, p->to, p->decoded.payload.size, p->decoded.payload.bytes);
         service->sendToMesh(p);
-#ifdef HAS_IMU_DETECTION
-        // Also send fixed position on motion detection
-        if (isImuMode && positionModule) {
-            positionModule->sendOurPosition();
-        }
-#endif
     } else
         LOG_ERROR("Message not allow on Public channel");
     delete[] message;

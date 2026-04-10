@@ -425,14 +425,6 @@ void nrf52Setup()
     assert(r == NRFX_SUCCESS);
 }
 
-#ifdef HAS_IMU_DETECTION
-static volatile bool imuWoke = false;
-static void imuWokeISR()
-{
-    imuWoke = true;
-}
-#endif
-
 void cpuDeepSleep(uint32_t msecToWake)
 {
     // FIXME, configure RTC or button press to wake us
@@ -475,35 +467,8 @@ void cpuDeepSleep(uint32_t msecToWake)
                    meshtastic_Config_DeviceConfig_Role_TAK_TRACKER, meshtastic_Config_DeviceConfig_Role_SENSOR) &&
          config.power.is_power_saving == true)) {
         sd_power_mode_set(NRF_POWER_MODE_LOWPWR);
-
-#ifdef HAS_IMU_DETECTION
-        if (moduleConfig.detection_sensor.enabled &&
-            moduleConfig.detection_sensor.monitor_pin == IMU_INT1_PIN) {
-            // Chunked sleep: check IMU INT1 between 1-second chunks.
-            // INT1 is latched high on motion (latch mode set in initForDetection).
-            imuWoke = false;
-            attachInterrupt(digitalPinToInterrupt(IMU_INT1_PIN), imuWokeISR, RISING);
-
-            uint32_t remaining = msecToWake;
-            while (remaining > 0 && !imuWoke) {
-                uint32_t chunk = (remaining > 1000) ? 1000 : remaining;
-                delay(chunk);
-                remaining -= chunk;
-            }
-            detachInterrupt(digitalPinToInterrupt(IMU_INT1_PIN));
-
-            if (imuWoke) {
-                // Signal motion wake in GPREGRET2 (survives NVIC_SystemReset)
-                sd_power_gpregret_clr(1, 0xFF);
-                sd_power_gpregret_set(1, 0xAA); // MOTION_WAKE_MAGIC
-            }
-            NVIC_SystemReset();
-        } else
-#endif
-        {
-            delay(msecToWake);
-            NVIC_SystemReset();
-        }
+        delay(msecToWake);
+        NVIC_SystemReset();
     } else {
         // Resume on user button press
         // https://github.com/lyusupov/SoftRF/blob/81c519ca75693b696752235d559e881f2e0511ee/software/firmware/source/SoftRF/src/platform/nRF52.cpp#L1738

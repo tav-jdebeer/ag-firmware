@@ -21,7 +21,7 @@ pio run -e seeed_xiao_nrf52840_tav -t upload
 
 - MCU: Seeed XIAO nRF52840 Sense (nRF52840 + BLE + LSM6DS3TR-C 6-axis IMU)
 - LoRa: Wio-SX1262 for XIAO (Semtech SX1262)
-- Battery: Primary lithium (CR123A/AA), target 5+ year life
+- Battery: Primary lithium (CR123A/AA), target 5+ year life (production goal)
 - No GPS - fixed position at commissioning
 - No screen
 
@@ -34,59 +34,71 @@ pio run -e seeed_xiao_nrf52840_tav -t upload
 - **GPS**: undefined (`#undef HAS_GPS`), not removed from codebase - future variants can re-enable
 - **Screen**: excluded via `MESHTASTIC_EXCLUDE_SCREEN=1`
 
-## Meshtastic Configuration (MD1)
+## Proof of Concept Behavior
 
-After flashing, configure via Meshtastic app or CLI:
+The current PoC firmware does **one thing**: when the IMU detects motion, it transmits a single Position packet containing the device's fixed position. No heartbeat, no deep sleep, no text messages.
+
+- Boot → IMU init waits for the high-pass slope filter to settle (~1 sec) before arming
+- Motion detected → ONE Position packet sent (the position IS the alert)
+- Cooldown (`minimum_broadcast_secs`) blocks repeat sends within the window
+- Motion **during** cooldown is silently dropped (latch is cleared) — only motion **after** cooldown fires the next alert
+- RED LED flash on each detection for visual confirmation
+
+## Meshtastic Configuration (PoC)
+
+After flashing, configure via Meshtastic CLI. Order matters: set GPS off and fixed position BEFORE leaving CLIENT role config.
 
 ```bash
-# IMPORTANT: Configure position and detection BEFORE enabling power saving.
-# Once power saving is enabled, the device will sleep and may not respond to config commands.
-
-# Device role
-meshtastic --set device.role TRACKER
+# Device role - CLIENT for PoC (TRACKER + power_saving wipes fixed position on reboot)
+meshtastic --set device.role CLIENT
 
 # Channel (must not be default public channel)
 meshtastic --ch-set name "TAV-OPS" --ch-index 0
 
-# Fixed position (set during commissioning - MUST be set before power saving)
+# Disable power saving (no deep sleep in PoC)
+meshtastic --set power.is_power_saving false
+
+# GPS disabled (no GNSS hardware on MD1)
+meshtastic --set position.gps_mode DISABLED
+
+# Fixed position
 meshtastic --setlat XX.XXX --setlon YY.YYY --setalt ZZZ
 meshtastic --set position.fixed_position true
-meshtastic --set position.position_broadcast_secs 3600
 
-# Detection sensor
+# Disable scheduled position broadcasts (we only send on motion)
+meshtastic --set position.position_broadcast_secs 0
+
+# Disable scheduled telemetry broadcasts (noise without value for PoC)
+meshtastic --set telemetry.device_update_interval 0
+
+# Detection sensor — IMU mode is enabled by setting monitor_pin to IMU_INT1_PIN (18)
 meshtastic --set detection_sensor.enabled true
 meshtastic --set detection_sensor.monitor_pin 18
 meshtastic --set detection_sensor.detection_trigger_type LOGIC_HIGH
-meshtastic --set detection_sensor.minimum_broadcast_secs 60
-meshtastic --set detection_sensor.state_broadcast_secs 3600
+meshtastic --set detection_sensor.minimum_broadcast_secs 30
+meshtastic --set detection_sensor.state_broadcast_secs 0
+meshtastic --set detection_sensor.send_bell false
 meshtastic --set detection_sensor.name "MD1"
-meshtastic --set detection_sensor.send_bell true
-
-# Power saving (enable LAST - device will begin sleep cycle)
-meshtastic --set power.is_power_saving true
-meshtastic --set power.sds_secs 3600
 ```
 
 ## Implementation Progress
 
-### Completed
-- **Phase 1**: TAV variant created (clone of seeed_xiao_nrf52840_kit)
-- **Phase 2**: Variant customized (IMU pins, Wire1, GPS disabled, feature flags)
-- **Phase 3**: `LSM6DS3Sensor::initForDetection()` implemented with Adafruit API + latch mode
-- **Phase 4**: `DetectionSensorModule` extended for IMU mode, position broadcast on detection, verified on hardware
+### Completed (PoC working on hardware)
+- TAV variant created and customized (IMU pins, Wire1, GPS disabled, feature flags)
+- `LSM6DS3Sensor::initForDetection()` configures IMU for autonomous wake detection with latched INT1
+- `DetectionSensorModule` IMU mode: motion → single Position packet, cooldown handling, settling wait
 
-### Pending
-- **Phase 5**: Sleep with IMU interrupt wake (chunked delay with INT1 interrupt in `cpuDeepSleep()`)
-- **Phase 6**: Power optimization (`variant_shutdown()`, disable `AccelerometerThread`)
-- **Phase 7**: Configurable sensitivity threshold via protobuf field (`imu_sensitivity`)
+### Future Work (deferred to production)
+- **Deep sleep**: re-add as a clean module-level concern (separate from DetectionSensorModule). 5+ year battery life on CR123A is the goal.
+- **Heartbeat**: implement as a periodic Telemetry packet (DeviceMetrics with battery + uptime), not as a text message
+- **Configurable IMU sensitivity threshold**: add `imu_sensitivity` proto field (currently hardcoded to 10 ≈ 310mg)
+- **Reduce wake-to-send latency**: when deep sleep is added, the cold-boot path takes 20-30s. Investigate ways to send the alert earlier in boot.
+- **Remove debug LED + INT1 polling log** for production
 
-## Known Issues / Notes
+## Known Quirks / Gotchas
 
-- IMU wake threshold is currently hardcoded to 5 (~155mg) for testing. Will be made configurable in Phase 7.
-- Debug LED indicators: BLUE 2s = IMU init OK, RED flash = motion detected. Remove for production.
-- Debug logging (INT1 state every 5s) should be removed for production.
-- `detection_trigger_type` must be `LOGIC_HIGH` (not `RISING_EDGE`) for proper re-triggering with latched interrupts.
-- **Wake-to-send latency is 20-30s** after motion (because the device does a full reboot via `NVIC_SystemReset`, including LoRa init, mesh joining, etc.). Future optimization: investigate ways to send the alert earlier in the boot sequence, or use a lighter wake mechanism that doesn't require full reboot.
-- `MD1_SLEEP_SETTLE_MS` (30000) and `MD1_DEFAULT_SLEEP_SECS` (3600) in DetectionSensorModule.cpp are hardcoded — should be moved to proto config in Phase 7.
-- GPS must be set to `DISABLED` (`position.gps_mode 0`) — otherwise it overwrites fixed position with zeros on boot.
-- Fixed position must be set BEFORE enabling power saving (otherwise device sleeps before config can be applied).
+- **GPS must be `DISABLED`** (`position.gps_mode 0`) — otherwise the GPS module overwrites the fixed position with zeros on boot.
+- **TRACKER role + `power.is_power_saving=true` wipes the fixed position on every boot** ([PositionModule.cpp:46-51](src/modules/PositionModule.cpp#L46-L51)). For fixed-position sensors, use CLIENT role or keep power_saving off.
+- **`detection_trigger_type` must be `LOGIC_HIGH`** (not `RISING_EDGE`) for proper re-triggering with latched interrupts.
+- **IMU high-pass filter takes ~1 sec to settle** after init. The init code polls INT1 until it stays LOW for 500ms before considering the sensor armed.
+- **The detection text message and position broadcast are separate mesh packets** (different ports). The PoC only sends Position; the Position protobuf has no free-form text field.

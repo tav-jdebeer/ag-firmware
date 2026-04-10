@@ -85,6 +85,14 @@ bool LSM6DS3Sensor::initForDetection(uint8_t threshold)
     // INT1 active-high, push-pull
     imu.configIntOutputs(false, false);
 
+    // Clear any pre-existing latched WAKE_UP event so we start with INT1 = LOW
+    // Reading WAKE_UP_SRC (0x1B) clears the latch
+    IMU_WIRE.beginTransmission(LSM6DS_I2CADDR_DEFAULT);
+    IMU_WIRE.write(0x1B); // WAKE_UP_SRC register
+    IMU_WIRE.endTransmission(false);
+    IMU_WIRE.requestFrom((uint8_t)LSM6DS_I2CADDR_DEFAULT, (uint8_t)1);
+    IMU_WIRE.read();
+
     IMU_WIRE.end(); // IMU runs autonomously, no further I2C needed
 
     LOG_INFO("IMU configured for motion detection: threshold=%d, INT1 on pin %d", threshold, IMU_INT1_PIN);
