@@ -9,6 +9,7 @@
 #ifdef HAS_IMU_DETECTION
 #include "motion/LSM6DS3Sensor.h"
 #include "modules/PositionModule.h"
+#include "sleep.h"
 #endif
 DetectionSensorModule *detectionSensorModule;
 
@@ -143,6 +144,25 @@ int32_t DetectionSensorModule::runOnce()
         sendCurrentStateMessage(hasDetectionEvent());
         return DELAYED_INTERVAL;
     }
+
+#ifdef HAS_IMU_DETECTION
+    // MD1 sleep cycle: when in IMU mode with power saving enabled, sleep after
+    // initial activity. The IMU INT1 interrupt will wake us early on motion.
+    // Sleep for state_broadcast_secs interval (heartbeat).
+    // TODO: replace hardcoded MD1_SLEEP_SETTLE_MS / default sleep duration
+    //       with a #define or proto config value (Phase 7).
+    #define MD1_SLEEP_SETTLE_MS 30000  // wait this long after last mesh send before sleeping
+    #define MD1_DEFAULT_SLEEP_SECS 3600 // fallback if state_broadcast_secs is 0
+    if (isImuMode && config.power.is_power_saving && lastSentToMesh > 0 &&
+        !Throttle::isWithinTimespanMs(lastSentToMesh, MD1_SLEEP_SETTLE_MS)) {
+        uint32_t sleepSecs = moduleConfig.detection_sensor.state_broadcast_secs > 0
+                                ? moduleConfig.detection_sensor.state_broadcast_secs
+                                : MD1_DEFAULT_SLEEP_SECS;
+        LOG_INFO("MD1: entering deep sleep for %u seconds (motion will wake)", sleepSecs);
+        doDeepSleep((uint32_t)sleepSecs * 1000, false, false);
+    }
+#endif
+
     return GPIO_POLLING_INTERVAL;
 }
 

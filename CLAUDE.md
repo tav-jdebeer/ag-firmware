@@ -39,8 +39,19 @@ pio run -e seeed_xiao_nrf52840_tav -t upload
 After flashing, configure via Meshtastic app or CLI:
 
 ```bash
+# IMPORTANT: Configure position and detection BEFORE enabling power saving.
+# Once power saving is enabled, the device will sleep and may not respond to config commands.
+
 # Device role
-meshtastic --set device.role SENSOR
+meshtastic --set device.role TRACKER
+
+# Channel (must not be default public channel)
+meshtastic --ch-set name "TAV-OPS" --ch-index 0
+
+# Fixed position (set during commissioning - MUST be set before power saving)
+meshtastic --setlat XX.XXX --setlon YY.YYY --setalt ZZZ
+meshtastic --set position.fixed_position true
+meshtastic --set position.position_broadcast_secs 3600
 
 # Detection sensor
 meshtastic --set detection_sensor.enabled true
@@ -51,11 +62,7 @@ meshtastic --set detection_sensor.state_broadcast_secs 3600
 meshtastic --set detection_sensor.name "MD1"
 meshtastic --set detection_sensor.send_bell true
 
-# Fixed position (set during commissioning)
-meshtastic --setlat XX.XXX --setlon YY.YYY --setalt ZZZ
-meshtastic --set position.fixed_position true
-
-# Power saving (for sleep mode - Phase 5)
+# Power saving (enable LAST - device will begin sleep cycle)
 meshtastic --set power.is_power_saving true
 meshtastic --set power.sds_secs 3600
 ```
@@ -79,3 +86,7 @@ meshtastic --set power.sds_secs 3600
 - Debug LED indicators: BLUE 2s = IMU init OK, RED flash = motion detected. Remove for production.
 - Debug logging (INT1 state every 5s) should be removed for production.
 - `detection_trigger_type` must be `LOGIC_HIGH` (not `RISING_EDGE`) for proper re-triggering with latched interrupts.
+- **Wake-to-send latency is 20-30s** after motion (because the device does a full reboot via `NVIC_SystemReset`, including LoRa init, mesh joining, etc.). Future optimization: investigate ways to send the alert earlier in the boot sequence, or use a lighter wake mechanism that doesn't require full reboot.
+- `MD1_SLEEP_SETTLE_MS` (30000) and `MD1_DEFAULT_SLEEP_SECS` (3600) in DetectionSensorModule.cpp are hardcoded — should be moved to proto config in Phase 7.
+- GPS must be set to `DISABLED` (`position.gps_mode 0`) — otherwise it overwrites fixed position with zeros on boot.
+- Fixed position must be set BEFORE enabling power saving (otherwise device sleeps before config can be applied).
