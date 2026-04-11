@@ -9,6 +9,8 @@ Meshtastic firmware fork for TAV Networks IoT devices, starting with the MD1 Mot
 - `src/modules/DetectionSensorModule.cpp` - Extended with IMU mode (`HAS_IMU_DETECTION`)
 - `src/main.cpp` - Added `SKIP_WIRE1_SCAN` guard to prevent I2C scan hang
 - `docs/MD1 - User Requirement Specification.md` - Product URS
+- `docs/mqtt2tb.js` - ThingsBoard TBEL uplink converter for the HiveMQ MQTT integration
+- `docs/ThingsBoard-Telegram-Alerts.md` - Per-profile rule chain setup for Telegram notifications on motion events
 
 ## Build
 
@@ -46,17 +48,21 @@ The current PoC firmware does **one thing**: when the IMU detects motion, it tra
 
 ## Meshtastic Configuration (PoC)
 
-After flashing, configure via Meshtastic CLI. Order matters: set GPS off and fixed position BEFORE leaving CLIENT role config.
+After flashing, configure via Meshtastic CLI. Order matters: leave the primary channel unnamed (see "Channel Configuration Quirk" below), set GPS off and fixed position BEFORE doing anything else.
 
 ```bash
 # Device role - CLIENT for PoC (TRACKER + power_saving wipes fixed position on reboot)
 meshtastic --set device.role CLIENT
 
-# Channel (must not be default public channel)
-meshtastic --ch-set name "TAV-OPS" --ch-index 0
-
 # Disable power saving (no deep sleep in PoC)
 meshtastic --set power.is_power_saving false
+
+# Primary channel: leave unnamed (default), set a shared PSK matching the gateway.
+# DO NOT rename the primary channel — this breaks mesh routing when MD1 and
+# gateway are on mixed firmware versions. See "Channel Configuration Quirk".
+# If you need a named channel for human text messaging, add it as a secondary:
+#   meshtastic --ch-add "TAV-OPS"
+#   meshtastic --ch-set psk <base64-key> --ch-index 1
 
 # GPS disabled (no GNSS hardware on MD1)
 meshtastic --set position.gps_mode DISABLED
@@ -83,17 +89,33 @@ meshtastic --set detection_sensor.name "MD1"
 
 ## Implementation Progress
 
-### Completed (PoC working on hardware)
+### Completed (PoC end-to-end verified on hardware)
+
+**Firmware**
 - TAV variant created and customized (IMU pins, Wire1, GPS disabled, feature flags)
 - `LSM6DS3Sensor::initForDetection()` configures IMU for autonomous wake detection with latched INT1
-- `DetectionSensorModule` IMU mode: motion → single Position packet, cooldown handling, settling wait
+- `DetectionSensorModule` IMU mode: motion → single Position packet, cooldown handling, high-pass filter settling wait
+- Motion during cooldown is silently dropped (latch is cleared, no stale alerts)
+
+**Backend integration**
+- Gateway (RAK11200) is bridging MD1 mesh traffic to HiveMQ Cloud via TLS MQTT
+- ThingsBoard Cloud PE HiveMQ integration subscribes `tav/2/json/+/#` and auto-creates devices
+- [docs/mqtt2tb.js](docs/mqtt2tb.js) TBEL uplink converter parses Meshtastic JSON, extracts position/telemetry/nodeinfo, and maps `TAV-MD1-*` nodes to the `MD1` device profile on creation
+- Dedicated `MD1 Rule Chain` assigned to the `MD1` profile handles MD1-specific behavior
+- Telegram notification on each motion event: text message with clickable Google Maps link + inline location pin (see [docs/ThingsBoard-Telegram-Alerts.md](docs/ThingsBoard-Telegram-Alerts.md))
+
+**Verification path**: shake MD1 → RED LED flash → LoRa transmit → gateway receives → HiveMQ publish → ThingsBoard ingest → device position updates → MD1 Rule Chain fires → Telegram message arrives on phone with tappable map pin. All links tested and working.
 
 ### Future Work (deferred to production)
+
 - **Deep sleep**: re-add as a clean module-level concern (separate from DetectionSensorModule). 5+ year battery life on CR123A is the goal.
 - **Heartbeat**: implement as a periodic Telemetry packet (DeviceMetrics with battery + uptime), not as a text message
 - **Configurable IMU sensitivity threshold**: add `imu_sensitivity` proto field (currently hardcoded to 10 ≈ 310mg)
 - **Reduce wake-to-send latency**: when deep sleep is added, the cold-boot path takes 20-30s. Investigate ways to send the alert earlier in boot.
 - **Remove debug LED + INT1 polling log** for production
+- **Battery alerts / offline detection** in `MD1 Rule Chain` once telemetry heartbeat is in place
+- **Bot token out of rule chain config** — store as a ThingsBoard server attribute and reference via `$[...]` placeholder
+- **Multi-MD1 testing** — auto-provisioning via converter `deviceType` has been designed but only tested with one MD1 so far
 
 ## Known Quirks / Gotchas
 
@@ -141,7 +163,17 @@ MD1 motion
      topic: tav/2/json/<preset-name>/!<hex-node-id>
   → ThingsBoard Cloud HiveMQ integration subscribes tav/2/json/+/#
   → docs/mqtt2tb.js uplink converter parses JSON
-  → Device !<hex-node-id> gets latitude/longitude/altitude telemetry
+     - sets deviceType=MD1 for TAV-MD1-* longNames (auto-profile assignment)
+     - extracts latitude/longitude/altitude as telemetry
+  → Device !<hex-node-id> (in MD1 profile) receives telemetry update
+  → MD1 Rule Chain (default chain for MD1 profile) runs
+     - filter: msg has lat+lon
+     - branch 1: format text + POST to Telegram sendMessage
+     - branch 2: format location + POST to Telegram sendLocation
+     - forward original msg to Root Rule Chain (saves timeseries)
+  → Telegram chat receives:
+     - 🚨 Movement detected + clickable Google Maps link
+     - Inline location pin (tap to open native map app)
 ```
 
 ## Gateway (TAV-GW01) MQTT / ThingsBoard setup
@@ -166,6 +198,18 @@ MD1 motion
 - **Integration type**: HiveMQ (MQTT subscriber)
 - **Topic filter**: `tav/2/json/+/#` (wildcard on channel name so it survives channel renames)
   - **Do NOT hard-code a channel name** like `tav/2/json/TAV-OPS/#`. The MD1 sends on the default unnamed primary, which Meshtastic maps to the modem preset display name (e.g. `LongFast`). A wildcard catches any channel.
-- **Uplink converter**: [docs/mqtt2tb.js](docs/mqtt2tb.js) (TBEL). Parses Meshtastic JSON packets, extracts position / telemetry / nodeinfo / text, and outputs a `deviceName` of `!<hex-node-id>` (e.g. `!d36d787`).
-- **Device auto-create**: enable "Allow create devices or assets" on the integration so unknown nodes get provisioned automatically on first packet.
-- **Debugging**: use the integration's **Events** tab (Uplink / Debug) to see raw messages, converter output, and errors.
+- **Uplink converter**: [docs/mqtt2tb.js](docs/mqtt2tb.js) (TBEL). Parses Meshtastic JSON packets, extracts position / telemetry / nodeinfo / text. Outputs:
+  - `deviceName = "!" + hex(from)` (e.g. `!d36d787`)
+  - `deviceType = 'MD1'` when the packet is a `nodeinfo` with `longName` starting `TAV-MD1` — drives auto-profile assignment on device creation
+  - `deviceType = 'Gateway'` for `TAV-GW`-prefixed nodes
+  - Falls back to `meshtastic-node` for unknown nodes
+- **Device profiles**:
+  - `MD1` profile with **Default rule chain** set to `MD1 Rule Chain` — all MD1 telemetry goes through the dedicated chain
+  - `meshtastic-node` profile uses the root rule chain (default)
+- **Device auto-create**: enable "Allow create devices or assets" on the integration so unknown nodes get provisioned automatically on first packet and land in the correct profile.
+- **MD1 Rule Chain**: dedicated chain handling MD1-specific behavior. Currently:
+  - Filters on `msg.latitude != null && msg.longitude != null`
+  - Two parallel branches → Telegram sendMessage + sendLocation
+  - Forward node that passes every message back to Root Rule Chain so timeseries are saved normally
+  - See [docs/ThingsBoard-Telegram-Alerts.md](docs/ThingsBoard-Telegram-Alerts.md) for full setup
+- **Debugging**: use the integration's **Events** tab (Uplink / Debug) to see raw messages, converter output, and errors. Use debug mode on individual rule chain nodes to trace message flow.

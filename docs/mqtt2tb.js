@@ -1,6 +1,16 @@
 // ThingsBoard MQTT Integration — Uplink Data Converter (TBEL)
 // Parses Meshtastic JSON packets from tav/2/json/{channel}/{nodeId}
 //
+// Maps incoming packets onto ThingsBoard devices keyed by the Meshtastic
+// hex node ID (e.g. "!d36d787"). Nodes whose longName matches a TAV prefix
+// are auto-assigned to a dedicated device profile on creation:
+//   TAV-MD1-*  -> 'MD1'       (handled by the MD1 Rule Chain)
+//   TAV-GW-*   -> 'Gateway'
+//   other      -> 'meshtastic-node'
+//
+// NOTE: ThingsBoard only uses deviceType at device-creation time. Existing
+// devices do not get re-profiled automatically — reassign manually if needed.
+//
 // To install: ThingsBoard -> Data Converters -> Add -> Uplink -> Paste this script
 
 var data = decodeToJson(payload);
@@ -25,7 +35,21 @@ var deviceName = topicNodeId;
 if (data.from != null) {
     deviceName = "!" + Long.toHexString(data.from);
 }
+
+// Default device type / profile. Nodeinfo packets carry the longName which
+// lets us map TAV-branded nodes onto their specific device profiles.
+// Note: ThingsBoard only uses deviceType at device-creation time. It does not
+// re-profile existing devices based on subsequent converter output, so
+// previously-created devices still need a manual profile change.
 var deviceType = 'meshtastic-node';
+if (data.type == 'nodeinfo' && data.payload != null && data.payload.longName != null) {
+    var longName = data.payload.longName;
+    if (longName.indexOf('TAV-MD1') === 0) {
+        deviceType = 'MD1';
+    } else if (longName.indexOf('TAV-GW') === 0) {
+        deviceType = 'Gateway';
+    }
+}
 
 var telemetry = {};
 telemetry.channel = channel;
