@@ -127,3 +127,45 @@ End-to-end test that the PoC works:
 6. Within ~5-10 seconds the gateway's view of the MD1 should refresh with an updated "last heard" timestamp; the position pin should be at the configured lat/lon.
 7. Repeat (after the cooldown window) — the position should update again.
 8. Shake during the cooldown — no update should occur (motion is silently dropped).
+
+## End-to-End Pipeline (PoC deployment)
+
+```
+MD1 motion
+  → IMU INT1 latched high
+  → DetectionSensorModule polling sees HIGH
+  → positionModule->sendOurPosition()
+  → LoRa SX1262 transmission (unnamed primary channel)
+  → Gateway (RAK11200) receives on primary
+  → MQTT publish to HiveMQ Cloud (TLS)
+     topic: tav/2/json/<preset-name>/!<hex-node-id>
+  → ThingsBoard Cloud HiveMQ integration subscribes tav/2/json/+/#
+  → docs/mqtt2tb.js uplink converter parses JSON
+  → Device !<hex-node-id> gets latitude/longitude/altitude telemetry
+```
+
+## Gateway (TAV-GW01) MQTT / ThingsBoard setup
+
+- **Broker**: HiveMQ Cloud (`ae11ebd8a9244098ac2541b35e571096.s1.eu.hivemq.cloud:8883`, TLS)
+- **Credentials**: `tav-mesh` / (stored on gateway — set with single-quoted shell string to avoid `$` expansion)
+- **Gateway config**:
+  ```bash
+  meshtastic --set mqtt.enabled true
+  meshtastic --set mqtt.address ae11ebd8a9244098ac2541b35e571096.s1.eu.hivemq.cloud
+  meshtastic --set mqtt.username tav-mesh
+  meshtastic --set mqtt.password '<password>'   # must be single-quoted in shell
+  meshtastic --set mqtt.tls_enabled true
+  meshtastic --set mqtt.json_enabled true
+  meshtastic --set mqtt.root tav
+  ```
+- **Primary channel** (index 0) has `uplink_enabled=true` and `downlink_enabled=true` so packets are bridged to MQTT.
+- **If `MQTT not connected, queue packet` appears in the log**: the gateway lost the broker connection. Reboot it (`meshtastic --reboot`). The password field is the most common culprit — shell interpretation of `$`/`#`/`*` characters during `--set` can mangle it. Always single-quote the password string.
+
+## ThingsBoard Cloud integration
+
+- **Integration type**: HiveMQ (MQTT subscriber)
+- **Topic filter**: `tav/2/json/+/#` (wildcard on channel name so it survives channel renames)
+  - **Do NOT hard-code a channel name** like `tav/2/json/TAV-OPS/#`. The MD1 sends on the default unnamed primary, which Meshtastic maps to the modem preset display name (e.g. `LongFast`). A wildcard catches any channel.
+- **Uplink converter**: [docs/mqtt2tb.js](docs/mqtt2tb.js) (TBEL). Parses Meshtastic JSON packets, extracts position / telemetry / nodeinfo / text, and outputs a `deviceName` of `!<hex-node-id>` (e.g. `!d36d787`).
+- **Device auto-create**: enable "Allow create devices or assets" on the integration so unknown nodes get provisioned automatically on first packet.
+- **Debugging**: use the integration's **Events** tab (Uplink / Debug) to see raw messages, converter output, and errors.
