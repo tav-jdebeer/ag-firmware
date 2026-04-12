@@ -82,9 +82,14 @@ meshtastic --set detection_sensor.enabled true
 meshtastic --set detection_sensor.monitor_pin 18
 meshtastic --set detection_sensor.detection_trigger_type LOGIC_HIGH
 meshtastic --set detection_sensor.minimum_broadcast_secs 30
-meshtastic --set detection_sensor.state_broadcast_secs 0
 meshtastic --set detection_sensor.send_bell false
 meshtastic --set detection_sensor.name "MD1"
+
+# IMU motion-detection sensitivity (1-100, lower = more sensitive, 0 = default).
+# In IMU mode, state_broadcast_secs is repurposed as the sensitivity value.
+# Mapped linearly onto the LSM6DS3TR-C 6-bit register (1-63).
+# Examples: 5 = very sensitive (~95mg), 16 = default (~310mg), 50 = moderate (~1g), 100 = least sensitive (~2g)
+meshtastic --set detection_sensor.state_broadcast_secs 16
 ```
 
 ## Implementation Progress
@@ -110,7 +115,7 @@ meshtastic --set detection_sensor.name "MD1"
 
 - **Deep sleep**: re-add as a clean module-level concern (separate from DetectionSensorModule). 5+ year battery life on CR123A is the goal.
 - **Heartbeat**: implement as a periodic Telemetry packet (DeviceMetrics with battery + uptime), not as a text message
-- **Configurable IMU sensitivity threshold**: add `imu_sensitivity` proto field (currently hardcoded to 10 ≈ 310mg)
+- ~~**Configurable IMU sensitivity threshold**~~: done — repurposed `state_broadcast_secs` as sensitivity (1-100) in IMU mode. A dedicated `imu_sensitivity` proto field should replace this for production.
 - **Reduce wake-to-send latency**: when deep sleep is added, the cold-boot path takes 20-30s. Investigate ways to send the alert earlier in boot.
 - **Remove debug LED + INT1 polling log** for production
 - **Battery alerts / offline detection** in `MD1 Rule Chain` once telemetry heartbeat is in place
@@ -124,6 +129,7 @@ meshtastic --set detection_sensor.name "MD1"
 - **`detection_trigger_type` must be `LOGIC_HIGH`** (not `RISING_EDGE`) for proper re-triggering with latched interrupts.
 - **IMU high-pass filter takes ~1 sec to settle** after init. The init code polls INT1 until it stays LOW for 500ms before considering the sensor armed (5-second overall timeout as a safety net).
 - **The detection text message and position broadcast are separate mesh packets** (different ports). The PoC only sends Position; the Position protobuf has no free-form text field.
+- **`detection_sensor.state_broadcast_secs` is repurposed as IMU sensitivity in IMU mode.** In GPIO mode it retains its upstream "state heartbeat interval" meaning. In IMU mode, setting it to e.g. 50 means "sensitivity 50/100", not "broadcast every 50 seconds". The heartbeat block in `runOnce()` is gated out for IMU mode. For production heartbeat, use `telemetry.device_update_interval` instead. A dedicated `imu_sensitivity` proto field should replace this repurposing long-term.
 - **`SoftDevice` SVCalls fault if called after BLE has been disabled.** During the Phase 5 deep sleep work we found that `sd_power_gpregret_set()` (and even direct `NRF_POWER->GPREGRET2 =` writes) cause a hardfault when called from inside `cpuDeepSleep()` after `setBluetoothEnable(false)` has run. `.noinit` RAM was used as an alternative persistence mechanism. This code has been removed from the PoC but the lesson remains relevant for the production deep-sleep work.
 
 ## Channel Configuration Quirk (gateway compatibility)

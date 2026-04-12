@@ -15,6 +15,13 @@ DetectionSensorModule *detectionSensorModule;
 #define GPIO_POLLING_INTERVAL 100
 #define DELAYED_INTERVAL 1000
 
+#ifdef HAS_IMU_DETECTION
+// Default LSM6DS3TR-C wake-up threshold register value (6-bit, 1-63) used when
+// detection_sensor.state_broadcast_secs is left at 0 in IMU mode. At 2G full
+// scale, 1 LSB ≈ 31 mg, so the default of 10 ≈ 310 mg.
+#define MD1_IMU_DEFAULT_THRESHOLD 10
+#endif
+
 typedef enum {
     DetectionSensorVerdictDetected,
     DetectionSensorVerdictSendState,
@@ -81,9 +88,28 @@ int32_t DetectionSensorModule::runOnce()
 #ifdef HAS_IMU_DETECTION
             if (moduleConfig.detection_sensor.monitor_pin == IMU_INT1_PIN) {
                 isImuMode = true;
+                // In IMU mode, state_broadcast_secs is repurposed as the motion-detection
+                // sensitivity (1-100, lower = more sensitive). 0 means "use the compile-time
+                // default". Mapped linearly onto the LSM6DS3TR-C 6-bit register (1-63).
+                // The upstream "state heartbeat" function is replaced by Meshtastic's standard
+                // TelemetryConfig for production heartbeat — see CLAUDE.md.
+                uint32_t pct = moduleConfig.detection_sensor.state_broadcast_secs;
+                uint8_t threshold;
+                if (pct == 0) {
+                    threshold = MD1_IMU_DEFAULT_THRESHOLD;
+                } else {
+                    if (pct > 100)
+                        pct = 100;
+                    uint32_t mapped = (pct * 63 + 50) / 100; // round-half-up
+                    if (mapped < 1)
+                        mapped = 1;
+                    threshold = (uint8_t)mapped;
+                }
                 // Configure IMU for autonomous motion detection with INT1 output
                 // (handles power-on, Wire init/end, and IMU register config internally)
-                LSM6DS3Sensor::initForDetection(10); // TODO: use configurable threshold (10 = ~310mg)
+                LSM6DS3Sensor::initForDetection(threshold);
+                LOG_INFO("Detection Sensor Module: IMU sensitivity=%u/100 -> threshold=%u",
+                         (unsigned)pct, (unsigned)threshold);
                 // INT1 is push-pull active-high from the IMU
                 pinMode(IMU_INT1_PIN, INPUT);
 
@@ -201,13 +227,20 @@ int32_t DetectionSensorModule::runOnce()
     // Even if we haven't detected an event, broadcast our current state to the mesh on the scheduled interval as a sort
     // of heartbeat. We only do this if the minimum broadcast interval is greater than zero, otherwise we'll only broadcast state
     // change detections.
-    if (moduleConfig.detection_sensor.state_broadcast_secs > 0 &&
-        !Throttle::isWithinTimespanMs(lastSentToMesh,
-                                      Default::getConfiguredOrDefaultMs(moduleConfig.detection_sensor.state_broadcast_secs,
-                                                                        default_telemetry_broadcast_interval_secs))) {
-        sendCurrentStateMessage(hasDetectionEvent());
-        return DELAYED_INTERVAL;
+    // In IMU mode, state_broadcast_secs is repurposed as the sensitivity value — skip the heartbeat.
+#ifdef HAS_IMU_DETECTION
+    if (!isImuMode) {
+#endif
+        if (moduleConfig.detection_sensor.state_broadcast_secs > 0 &&
+            !Throttle::isWithinTimespanMs(lastSentToMesh,
+                                          Default::getConfiguredOrDefaultMs(moduleConfig.detection_sensor.state_broadcast_secs,
+                                                                            default_telemetry_broadcast_interval_secs))) {
+            sendCurrentStateMessage(hasDetectionEvent());
+            return DELAYED_INTERVAL;
+        }
+#ifdef HAS_IMU_DETECTION
     }
+#endif
     return GPIO_POLLING_INTERVAL;
 }
 
