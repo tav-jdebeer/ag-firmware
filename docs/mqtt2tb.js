@@ -2,11 +2,7 @@
 // Parses Meshtastic JSON packets from tav/2/json/{channel}/{nodeId}
 //
 // Maps incoming packets onto ThingsBoard devices keyed by the Meshtastic
-// hex node ID (e.g. "!d36d787"). Nodes whose longName matches a TAV prefix
-// are auto-assigned to a dedicated device profile on creation:
-//   TAV-MD1-*  -> 'MD1'       (handled by the MD1 Rule Chain)
-//   TAV-GW-*   -> 'Gateway'
-//   other      -> 'meshtastic-node'
+// hex node ID (e.g. "!d36d787"). 
 //
 // NOTE: ThingsBoard only uses deviceType at device-creation time. Existing
 // devices do not get re-profiled automatically — reassign manually if needed.
@@ -36,20 +32,9 @@ if (data.from != null) {
     deviceName = "!" + Long.toHexString(data.from);
 }
 
-// Default device type / profile. Nodeinfo packets carry the longName which
-// lets us map TAV-branded nodes onto their specific device profiles.
-// Note: ThingsBoard only uses deviceType at device-creation time. It does not
-// re-profile existing devices based on subsequent converter output, so
-// previously-created devices still need a manual profile change.
-var deviceType = 'meshtastic-node';
-if (data.type == 'nodeinfo' && data.payload != null && data.payload.longName != null) {
-    var longName = data.payload.longName;
-    if (longName.indexOf('TAV-MD1') === 0) {
-        deviceType = 'MD1';
-    } else if (longName.indexOf('TAV-GW') === 0) {
-        deviceType = 'Gateway';
-    }
-}
+// Default device type
+// // Note: Device profile must be set manually after creation to ensure the appropriate rule engine is used
+var deviceType = 'TAV Device';
 
 var telemetry = {};
 telemetry.channel = channel;
@@ -59,6 +44,10 @@ if (data.hop_start != null) {
 if (data.hops_away != null) {
     telemetry.hops_away = data.hops_away;
 }
+
+// Mesh signal quality — present at envelope level on most packet types
+if (data.rssi != null) { telemetry.rssi = data.rssi; }
+if (data.snr != null) { telemetry.snr = data.snr; }
 
 var attributes = {};
 
@@ -108,72 +97,13 @@ if (data.type == 'nodeinfo') {
     }
 }
 
-if (data.type == 'telemetry' && data.payload.deviceMetrics != null) {
-    var dm = data.payload.deviceMetrics;
-    if (dm.batteryLevel != null) {
-        telemetry.battery_level = dm.batteryLevel;
-    }
-    if (dm.voltage != null) {
-        telemetry.voltage = dm.voltage;
-    }
-    if (dm.channelUtilization != null) {
-        telemetry.channel_utilization = dm.channelUtilization;
-    }
-    if (dm.airUtilTx != null) {
-        telemetry.air_util_tx = dm.airUtilTx;
-    }
-    if (dm.uptimeSeconds != null) {
-        telemetry.uptime_seconds = dm.uptimeSeconds;
-    }
-}
-
-if (data.type == 'telemetry' && data.payload.environmentMetrics != null) {
-    var em = data.payload.environmentMetrics;
-    if (em.temperature != null) {
-        telemetry.temperature = em.temperature;
-    }
-    if (em.relativeHumidity != null) {
-        telemetry.humidity = em.relativeHumidity;
-    }
-    if (em.barometricPressure != null) {
-        telemetry.pressure = em.barometricPressure;
-    }
-    if (em.gasResistance != null) {
-        telemetry.gas_resistance = em.gasResistance;
-    }
-    if (em.lux != null) {
-        telemetry.lux = em.lux;
-    }
-    if (em.windSpeed != null) {
-        telemetry.wind_speed = em.windSpeed;
-    }
-    if (em.windDirection != null) {
-        telemetry.wind_direction = em.windDirection;
-    }
-    if (em.soilMoisture != null) {
-        telemetry.soil_moisture = em.soilMoisture;
-    }
-    if (em.soilTemperature != null) {
-        telemetry.soil_temperature = em.soilTemperature;
-    }
-}
-
-if (data.type == 'telemetry' && data.payload.powerMetrics != null) {
-    var pm = data.payload.powerMetrics;
-    if (pm.ch1Voltage != null) { telemetry.power_ch1_voltage = pm.ch1Voltage; }
-    if (pm.ch1Current != null) { telemetry.power_ch1_current = pm.ch1Current; }
-    if (pm.ch2Voltage != null) { telemetry.power_ch2_voltage = pm.ch2Voltage; }
-    if (pm.ch2Current != null) { telemetry.power_ch2_current = pm.ch2Current; }
-    if (pm.ch3Voltage != null) { telemetry.power_ch3_voltage = pm.ch3Voltage; }
-    if (pm.ch3Current != null) { telemetry.power_ch3_current = pm.ch3Current; }
-}
-
-if (data.type == 'telemetry' && data.payload.airQualityMetrics != null) {
-    var aq = data.payload.airQualityMetrics;
-    if (aq.pm10Standard != null) { telemetry.pm1_0 = aq.pm10Standard; }
-    if (aq.pm25Standard != null) { telemetry.pm2_5 = aq.pm25Standard; }
-    if (aq.pm100Standard != null) { telemetry.pm10 = aq.pm100Standard; }
-    if (aq.co2 != null) { telemetry.co2 = aq.co2; }
+if (data.type == 'telemetry') {
+    var p = data.payload;
+    if (p.battery_level != null) { telemetry.battery_level = p.battery_level; }
+    if (p.voltage != null) { telemetry.voltage = p.voltage; }
+    if (p.channel_utilization != null) { telemetry.channel_utilization = p.channel_utilization; }
+    if (p.air_util_tx != null) { telemetry.air_util_tx = p.air_util_tx; }
+    if (p.uptime_seconds != null) { telemetry.uptime_seconds = p.uptime_seconds; }
 }
 
 if (data.type == 'telemetry' && data.payload.localStats != null) {

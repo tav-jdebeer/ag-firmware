@@ -64,6 +64,19 @@ meshtastic --set power.is_power_saving false
 #   meshtastic --ch-add "TAV-OPS"
 #   meshtastic --ch-set psk <base64-key> --ch-index 1
 
+# Allow MQTT forwarding — sets the ok_to_mqtt bit on outgoing packets so
+# any gateway that sees them is permitted to publish them to MQTT. Without
+# this, the gateway drops MD1 packets at the MQTT-publish step even though
+# mesh routing works. This is a NODE-wide client-side setting (separate from
+# the gateway's own uplink_enabled channel flag).
+meshtastic --set lora.config_ok_to_mqtt true
+
+# Enable precise (full 32-bit) location on channel 0. Default on some
+# channels is a reduced precision that rounds lat/lon for privacy on
+# public channels — for MD1 motion alerts we want the exact coordinates.
+# Must match the gateway's positionPrecision on the same channel.
+meshtastic --ch-set module_settings.position_precision 32 --ch-index 0
+
 # GPS disabled (no GNSS hardware on MD1)
 meshtastic --set position.gps_mode DISABLED
 
