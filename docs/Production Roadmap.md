@@ -2,7 +2,9 @@
 
 > **Status note**: this document describes the **target state** of the post-demo restructure. As of the commit that introduced this file, Phase 0 has only just started — most paths described below (`firmware/`, `deployment/`, `mobile/`, `devices/`) do not yet exist in the repo. See the **Files Modified Summary** for what each phase changes. Update this note as phases land.
 
-> **Repo rename**: this project is being renamed from `ag-firmware` to `asset-guard` to reflect the broader scope (it is a full solution — firmware, backend integration, customer deployment artifacts, and field-deployment mobile app — not just firmware). The rename happens on GitHub and in `.git/config`; local working copies stay functional as long as `origin` is updated. All paths below assume the new layout.
+> **Repo migration**: this project is moving from the public `ag-firmware` repo (a fork of meshtastic/firmware) to a new private `asset-guard` repo to reflect the broader scope and TAV's privacy requirements. GitHub does not allow toggling a fork to private, so the migration is done by mirror-cloning `ag-firmware` into a fresh empty `asset-guard` private repo (no fork relationship — the upstream link lives only as a git remote going forward). See **Repo migration procedure** and **Upstream sync workflow** under Phase 0 for operational recipes. All paths below assume the post-migration layout.
+
+> **GPL-3.0 note**: Meshtastic firmware is GPL-3.0. Going private internally is not a GPL violation — GPL only requires source disclosure when binaries are distributed. Customer-facing disclosure (public release branch, source-on-request, or written offer) needs to be set up before shipping product; that work is tracked outside this firmware roadmap but flagged here so it does not get lost.
 
 ## Context
 
@@ -93,6 +95,53 @@ asset-guard/
 **`tools/`**: future home for project-level scripts (e.g. `tools/flash-md1.sh`). Empty in Phase 0 but reserved.
 
 **`tests/`**: solution-level integration / E2E / ops tests. Firmware unit tests stay in `firmware/test/`.
+
+### Repo migration procedure
+
+GitHub does not allow toggling a fork's visibility to private. The migration is done by mirror-cloning the public fork into a fresh private repo, which detaches the GitHub-level fork relationship while preserving full history. The upstream link is re-established as a regular git remote.
+
+**One-time steps:**
+
+```bash
+# 1. Mirror-clone the public ag-firmware (full history, all branches and tags)
+git clone --mirror https://github.com/<org>/ag-firmware.git ag-firmware-mirror.git
+cd ag-firmware-mirror.git
+
+# 2. Create an empty private repo on GitHub: <org>/asset-guard
+#    (no README, no .gitignore, no license — completely empty)
+
+# 3. Push the mirror into the new private repo
+git remote set-url origin https://github.com/<org>/asset-guard.git
+git push --mirror origin
+```
+
+After the mirror push:
+
+```bash
+# 4. Clone asset-guard as the new working copy
+git clone https://github.com/<org>/asset-guard.git
+cd asset-guard
+
+# 5. Add upstream meshtastic/firmware as a tracked remote for future syncs
+git remote add upstream https://github.com/meshtastic/firmware.git
+git fetch upstream
+```
+
+**What transfers with the mirror push:**
+
+- All branches (including `develop`, `master`, all release tags)
+- Full commit history (commit hashes preserved exactly)
+- Submodule pointers (`.gitmodules` content and recorded SHAs)
+
+**What does NOT transfer (re-set on `asset-guard` after the move):**
+
+- GitHub Actions secrets and variables
+- Branch protection rules
+- Deploy keys, webhooks, GitHub Apps
+- Issues, pull requests, discussions, wiki, releases (these live in GitHub's API, not in git)
+- Renovate / Dependabot — `renovate.json` transfers in-tree, but the per-repo GitHub App installation needs to be redone
+
+**The public history of `ag-firmware` stays public forever.** The mirror push only seeds the new repo — it does not retroactively privatise anything. Anything already pushed to `ag-firmware` is publicly visible in archives, mirrors, and search-engine caches and cannot be removed. This is a one-way change going forward.
 
 ### File move operations
 
@@ -208,6 +257,35 @@ pio run --project-dir firmware -e seeed_xiao_nrf52840_tav -t upload
 ```
 
 `--project-dir` is the canonical command since it does not change the user's working directory.
+
+### Upstream sync workflow
+
+After Phase 0, `firmware/` is a subdirectory of `asset-guard` (not a fork, not a submodule). Future upstream pulls use git's **subtree merge strategy** — the `-X subtree=firmware` option on `git merge`. This is plain git; no extra `git-subtree` script required.
+
+**Recipe (per sync):**
+
+```bash
+git fetch upstream
+git checkout -b upstream-sync-<YYYY-MM-DD>
+git merge -s recursive -X subtree=firmware upstream/master
+# Resolve any conflicts (now scoped to firmware/...), then commit and PR
+```
+
+The `-X subtree=firmware` option tells the merge driver to treat `upstream/master`'s root as if it lives under `firmware/` in our tree. Files at `src/modules/PositionModule.cpp` upstream get matched to our `firmware/src/modules/PositionModule.cpp`. Documented in `git help merge` under "subtree".
+
+**Operational notes:**
+
+- Do upstream syncs on a dedicated branch (`upstream-sync-<date>`), not directly on `develop`. Easier to abandon if conflicts get hairy, and gives reviewers a clean diff.
+- Note the upstream SHA in the merge commit message so the sync is reproducible.
+- TAV-modified files (`DetectionSensorModule`, `LSM6DS3Sensor`, the MD1 variant) get conflicted on most upstream pulls — expected, normal cost of a fork. Resolve in favor of TAV semantics.
+- The protobufs submodule (`firmware/protobufs`) becomes a TAV fork after Phase 3. Re-syncing that fork against upstream protobufs is a separate operation done on the submodule itself, not driven by the parent `git merge -X subtree=`.
+
+**Why this approach over alternatives:**
+
+- **`git merge -X subtree=` (chosen)**: vanilla git, one command per sync, plays well with PR-based review.
+- **`git subtree pull` (the script)**: same end-state but adds a wrapper command. Works fine, just extra ceremony.
+- **`git submodule`**: two repos to maintain, every firmware change is two commits. Plan rejected this earlier — keeping that decision.
+- **`git filter-repo` history rewrite**: would make every upstream file appear to have always lived under `firmware/`, but rewrites every commit hash and breaks references. Not worth the disruption for a "live alongside upstream" use case.
 
 ### New files
 
