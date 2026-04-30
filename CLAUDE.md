@@ -118,7 +118,7 @@ meshtastic --set detection_sensor.state_broadcast_secs 16
 **Backend integration**
 - Gateway (RAK11200) is bridging MD1 mesh traffic to HiveMQ Cloud via TLS MQTT
 - ThingsBoard Cloud PE HiveMQ integration subscribes `tav/2/json/+/#` and auto-creates devices
-- [docs/mqtt2tb.js](docs/mqtt2tb.js) TBEL uplink converter parses Meshtastic JSON, extracts position/telemetry/nodeinfo, and maps `TAV-MD1-*` nodes to the `MD1` device profile on creation
+- [docs/mqtt2tb.js](docs/mqtt2tb.js) TBEL uplink converter parses Meshtastic JSON and extracts position/telemetry/nodeinfo. New devices land in the default `TAV Device` profile and must be reassigned to `MD1` manually after first packet.
 - Dedicated `MD1 Rule Chain` assigned to the `MD1` profile handles MD1-specific behavior
 - Telegram notification on each motion event: text message with clickable Google Maps link + inline location pin (see [docs/ThingsBoard-Telegram-Alerts.md](docs/ThingsBoard-Telegram-Alerts.md))
 
@@ -182,9 +182,9 @@ MD1 motion
      topic: tav/2/json/<preset-name>/!<hex-node-id>
   → ThingsBoard Cloud HiveMQ integration subscribes tav/2/json/+/#
   → docs/mqtt2tb.js uplink converter parses JSON
-     - sets deviceType=MD1 for TAV-MD1-* longNames (auto-profile assignment)
+     - sets deviceType='TAV Device' (manual reassignment to MD1 profile per device after creation)
      - extracts latitude/longitude/altitude as telemetry
-  → Device !<hex-node-id> (in MD1 profile) receives telemetry update
+  → Device !<hex-node-id> (after manual reassignment to MD1 profile) receives telemetry update
   → MD1 Rule Chain (default chain for MD1 profile) runs
      - filter: msg has lat+lon
      - branch 1: format text + POST to Telegram sendMessage
@@ -219,13 +219,11 @@ MD1 motion
   - **Do NOT hard-code a channel name** like `tav/2/json/TAV-OPS/#`. The MD1 sends on the default unnamed primary, which Meshtastic maps to the modem preset display name (e.g. `LongFast`). A wildcard catches any channel.
 - **Uplink converter**: [docs/mqtt2tb.js](docs/mqtt2tb.js) (TBEL). Parses Meshtastic JSON packets, extracts position / telemetry / nodeinfo / text. Outputs:
   - `deviceName = "!" + hex(from)` (e.g. `!d36d787`)
-  - `deviceType = 'MD1'` when the packet is a `nodeinfo` with `longName` starting `TAV-MD1` — drives auto-profile assignment on device creation
-  - `deviceType = 'Gateway'` for `TAV-GW`-prefixed nodes
-  - Falls back to `meshtastic-node` for unknown nodes
+  - `deviceType = 'TAV Device'` for all incoming packets — devices are auto-created in this default profile and **must be reassigned to the appropriate profile (e.g. `MD1`, `Gateway`) manually** after first packet
 - **Device profiles**:
-  - `MD1` profile with **Default rule chain** set to `MD1 Rule Chain` — all MD1 telemetry goes through the dedicated chain
-  - `meshtastic-node` profile uses the root rule chain (default)
-- **Device auto-create**: enable "Allow create devices or assets" on the integration so unknown nodes get provisioned automatically on first packet and land in the correct profile.
+  - `MD1` profile with **Default rule chain** set to `MD1 Rule Chain` — all MD1 telemetry goes through the dedicated chain once the device is reassigned to this profile
+  - `TAV Device` is the default profile new nodes land in until manually re-profiled (uses root rule chain)
+- **Device auto-create**: enable "Allow create devices or assets" on the integration so unknown nodes get provisioned automatically on first packet (into the `TAV Device` profile).
 - **MD1 Rule Chain**: dedicated chain handling MD1-specific behavior. Currently:
   - Filters on `msg.latitude != null && msg.longitude != null`
   - Two parallel branches → Telegram sendMessage + sendLocation

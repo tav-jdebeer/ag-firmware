@@ -78,7 +78,7 @@ Assign existing MD1 devices to this profile:
 3. In the device details panel, click the **pencil / edit** icon next to the profile name
 4. Change to `MD1` and save
 
-For **future** MD1 devices: the [docs/mqtt2tb.js](mqtt2tb.js) converter detects Meshtastic nodes whose `longName` starts with `TAV-MD1` and sets `deviceType = 'MD1'` on the converter output. ThingsBoard auto-creates new devices under the profile matching that name, so newly provisioned MD1s land in the `MD1` profile directly. This takes effect on **device creation** only — ThingsBoard does not re-profile existing devices based on subsequent converter output.
+For **future** MD1 devices: new Meshtastic nodes auto-create in ThingsBoard under the default `TAV Device` profile (the [docs/mqtt2tb.js](mqtt2tb.js) converter does not currently auto-detect MD1 nodes by `longName`). After the first packet from a new MD1, manually reassign it to the `MD1` profile using the steps above so the dedicated rule chain takes over.
 
 ## Step 4 — Create the `MD1 Rule Chain`
 
@@ -246,10 +246,10 @@ Because `MD1 Rule Chain` is dedicated to MD1 devices, additional MD1-specific be
 - **Snooze windows** — use a server attribute on each MD1 (`alert_snoozed_until`) and check it in the filter script to suppress alerts during maintenance
 - **Cross-posting** — add parallel branches that POST to Slack / email / SMS using similar REST API Call nodes
 
-The same pattern applies for future device profiles — e.g. create a `Gateway Rule Chain` for the gateway's own logic, assigned to the `Gateway` profile, which the converter already populates for `TAV-GW`-prefixed nodes.
+The same pattern applies for future device profiles — e.g. create a `Gateway Rule Chain` for the gateway's own logic, assigned to a `Gateway` profile. New gateway nodes land in the default `TAV Device` profile and need manual reassignment after the first packet, the same way as MD1s.
 
 ## Related documents
 
 - [CLAUDE.md](../CLAUDE.md) — overall project context and MD1 configuration
-- [docs/mqtt2tb.js](mqtt2tb.js) — the ThingsBoard uplink converter that parses incoming Meshtastic JSON packets and sets the `deviceType` based on the node's `longName` prefix
+- [docs/mqtt2tb.js](mqtt2tb.js) — the ThingsBoard uplink converter that parses incoming Meshtastic JSON packets and outputs telemetry to the `TAV Device` default profile (manual profile reassignment per device)
 - [docs/MD1 - User Requirement Specification.md](MD1%20-%20User%20Requirement%20Specification.md) — product URS
